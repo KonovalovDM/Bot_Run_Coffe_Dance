@@ -1,0 +1,9 @@
+{
+  "BOT_TOKEN": "7459004608:AAE5urzuckjSw7PjKbPGh4IvfWGyma828YQ",
+  "ADMIN_IDS": [123456789],
+  "DB_USER": "postgres",
+  "DB_PASSWORD": "your_password",
+  "DB_NAME": "event_bot",
+  "DB_HOST": "localhost",
+  "EVENT_DATE": "2024-12-15"
+}
