@@ -14,6 +14,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 temp_storage = {}  # Глобальное временное хранилище
 confirm_clear = {} # Глобальная переменная для хранения состояния подтверждения удаления данных
+current_user_to_delete = {}
 
 # Загрузка конфигурации
 with open("config.json", "r", encoding="utf-8") as config_file:
@@ -319,77 +320,95 @@ async def cmd_db_empty(message: types.Message):
         if conn:
             await conn.close()
 
+# Команда удаления пользователя
+@dp.message(Command("delete_user"), F.from_user.id.in_(CONFIG["ADMIN_IDS"]))
+async def cmd_delete_user(message: types.Message):
+    try:
+        # Получаем user_id из сообщения
+        parts = message.text.split()
+        if len(parts) < 2:
+            await message.answer("Использование: /delete_user <user_id>")
+            return
 
-# Очистка базы данных с подтверждением
+        user_id = int(parts[1])
+        current_user_to_delete[message.from_user.id] = user_id
+
+        # Запрашиваем подтверждение
+        await message.answer(
+            f"⚠️ Вы уверены, что хотите удалить пользователя с ID {user_id}?\n"
+            "Отправьте 'ДА' для подтверждения или 'НЕТ' для отмены."
+        )
+    except ValueError:
+        await message.answer("Ошибка: user_id должен быть числом")
+
+
+# Обработка подтверждения для удаления пользователя и очистки БД
+@dp.message(F.text.in_(["ДА", "НЕТ"]), F.from_user.id.in_(CONFIG["ADMIN_IDS"]))
+async def handle_confirmation(message: types.Message):
+    user_id = message.from_user.id
+
+    if user_id in confirm_clear:
+        # Обработка подтверждения для очистки БД
+        if message.text == "ДА":
+            conn = None
+            try:
+                conn = await get_db()
+                count = await conn.fetchval("SELECT COUNT(*) FROM participants")
+
+                if count == 0:
+                    await message.answer("База данных уже пуста")
+                    return
+
+                await conn.execute("TRUNCATE TABLE participants RESTART IDENTITY")
+                await message.answer(f"✅ База данных очищена. Удалено {count} записей.")
+            except Exception as e:
+                logging.error(f"Ошибка очистки БД: {e}")
+                await message.answer("⚠️ Произошла ошибка при очистке базы данных")
+            finally:
+                if conn:
+                    await conn.close()
+        else:
+            await message.answer("Очистка базы данных отменена")
+
+        confirm_clear.pop(user_id, None)
+
+    elif user_id in current_user_to_delete:
+        # Обработка подтверждения для удаления пользователя
+        if message.text == "ДА":
+            conn = None
+            try:
+                user_id_to_delete = current_user_to_delete[user_id]
+                conn = await get_db()
+                result = await conn.execute(
+                    "DELETE FROM participants WHERE id = $1",
+                    user_id_to_delete
+                )
+
+                if "DELETE 1" in result:
+                    await message.answer(f"✅ Пользователь {user_id_to_delete} удален")
+                else:
+                    await message.answer("❌ Пользователь не найден")
+            except Exception as e:
+                logging.error(f"Ошибка удаления пользователя: {e}")
+                await message.answer("⚠️ Произошла ошибка при удалении пользователя")
+            finally:
+                if conn:
+                    await conn.close()
+        else:
+            await message.answer("Удаление пользователя отменено")
+
+        current_user_to_delete.pop(user_id, None)
+
+
+# Команда очистки БД с подтверждением
 @dp.message(Command("clear_db"), F.from_user.id.in_(CONFIG["ADMIN_IDS"]))
 async def cmd_clear_db(message: types.Message):
-    # Запрашиваем подтверждение
     confirm_clear[message.from_user.id] = True
     await message.answer(
         "⚠️ Вы уверены, что хотите полностью очистить базу данных?\n"
         "Это действие нельзя отменить!\n\n"
         "Отправьте 'ДА' для подтверждения или 'НЕТ' для отмены."
     )
-
-
-@dp.message(F.text.in_({"ДА", "НЕТ"}) & F.from_user.id.in_(CONFIG["ADMIN_IDS"]))
-async def handle_clear_confirmation(message: types.Message):
-    user_id = message.from_user.id
-    if user_id not in confirm_clear:
-        return
-
-    if message.text == "НЕТ":
-        del confirm_clear[user_id]
-        await message.answer("Очистка базы данных отменена")
-        return
-
-    # Если подтвердили "ДА"
-    conn = None
-    try:
-        conn = await get_db()
-        count = await conn.fetchval("SELECT COUNT(*) FROM participants")
-
-        if count == 0:
-            await message.answer("База данных уже пуста")
-            return
-
-        await conn.execute("TRUNCATE TABLE participants RESTART IDENTITY CASCADE")
-        await message.answer(f"✅ База данных очищена. Удалено {count} записей.")
-
-    except Exception as e:
-        logging.error(f"Ошибка очистки БД: {e}")
-        await message.answer("⚠️ Произошла ошибка при очистке базы данных")
-    finally:
-        if conn:
-            await conn.close()
-        confirm_clear.pop(user_id, None)
-
-# Удаление конкретного участника из базы данных
-@dp.message(Command("delete_user"), F.from_user.id.in_(CONFIG["ADMIN_IDS"]))
-async def cmd_delete_user(message: types.Message):
-    try:
-        # Ожидаем команду в формате: /delete_user <user_id>
-        user_id = int(message.text.split()[1])
-
-        conn = await get_db()
-        result = await conn.execute(
-            "DELETE FROM participants WHERE telegram_user_id = $1",
-            user_id
-        )
-
-        if result == "DELETE 1":
-            await message.answer(f"✅ Пользователь {user_id} удален")
-        else:
-            await message.answer("Пользователь не найден")
-
-    except (IndexError, ValueError):
-        await message.answer("Использование: /delete_user <user_id>")
-    except Exception as e:
-        logging.error(f"Ошибка удаления пользователя: {e}")
-        await message.answer("⚠️ Произошла ошибка при удалении пользователя")
-    finally:
-        if 'conn' in locals():
-            await conn.close()
 
 # Основная функция
 async def main():
