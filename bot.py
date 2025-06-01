@@ -8,11 +8,12 @@ from datetime import datetime, timedelta
 import asyncpg
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
+from aiogram.types import InputFile
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-temp_storage = {}  # Глобальное временное хранилище
+temp_storage = {}  # Глобальное временное хранилище для данных регистрации
 confirm_clear = {} # Глобальная переменная для хранения состояния подтверждения удаления данных
 current_user_to_delete = {}
 
@@ -43,6 +44,36 @@ async def get_db():
         host=CONFIG["DB_HOST"]
     )
 
+# Обработчик первого входа в бота
+@dp.message(F.chat_join_request | F.new_chat_members)
+async def welcome_video(message: types.Message):
+    try:
+        # Проверяем, что пользователь новый
+        if message.new_chat_members and message.new_chat_members[0].id == message.from_user.id:
+            # Отправляем видео
+            video = InputFile("media/welcome_video.mp4")
+
+            # Кнопка регистрации
+            builder = ReplyKeyboardBuilder()
+            builder.add(KeyboardButton(text="🟢 Зарегистрироваться", request_contact=True))
+
+            await message.answer_video(
+                video=video,
+                caption="Добро пожаловать на мероприятие «Бег, Кофе, Танцы»!\n\n"
+                        "Нажмите кнопку ниже, чтобы зарегистрироваться:",
+                reply_markup=builder.as_markup(
+                    resize_keyboard=True,
+                    one_time_keyboard=True
+                )
+            )
+
+            # Логируем отправку
+            logging.info(f"Sent welcome video to {message.from_user.id}")
+
+    except Exception as e:
+        logging.error(f"Error sending welcome video: {e}")
+        await message.answer("Добро пожаловать! Нажмите /start для регистрации")
+
 # Команда /start
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -62,47 +93,65 @@ async def handle_contact(message: types.Message):
     # Если username отсутствует, просим ввести вручную
     if not username:
         # Сохраняем номер во временное хранилище
-        temp_storage[message.from_user.id] = {"phone": phone}
+        temp_storage[message.from_user.id] = {
+            "phone": phone,
+            "timestamp": datetime.now()
+        }
         await message.answer(
-            "Пожалуйста, введите ваш @username вручную:",
+            "Пожалуйста, введите ваш @username вручную (без символа @):",
             reply_markup=types.ReplyKeyboardRemove()
         )
         return
 
     # Сохраняем данные
-    await save_participant(message.from_user.id, username, phone)
-    await message.answer(
-        MESSAGES["registration_success"],
-        reply_markup=types.ReplyKeyboardRemove()
-    )
+    try:
+        await save_participant(message.from_user.id, username, phone)
+        await message.answer(
+            MESSAGES["registration_success"],
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+    except Exception as e:
+        logging.error(f"Ошибка регистрации: {e}")
+        await message.answer("Произошла ошибка при регистрации. Попробуйте еще раз.")
+
 
 # Обработка ручного ввода username
 @dp.message(F.text & ~F.text.startswith('/'))
 async def handle_username_input(message: types.Message):
-    # Проверяем, что это ответ на запрос username
-    if not (message.reply_to_message and
-            "введите ваш @username" in message.reply_to_message.text):
+    user_id = message.from_user.id
+
+    # Проверяем, что пользователь начал процесс регистрации
+    if user_id not in temp_storage:
         return
 
-    username = message.text.strip('@')  # Удаляем @, если пользователь его ввел
-    phone = None  # Номер будем получать из предыдущего сообщения
-
-    # Здесь реализована логика сохранения username
-    # Можно использовать временное хранилище или БД для связи с номером телефона
-    temp_storage = {}
-
-    # В обработчике контакта
-    if not username:
-        temp_storage[message.from_user.id] = {"phone": phone}
-        await message.answer("Введите @username:")
+    # Проверяем таймаут (5 минут на ввод)
+    if (datetime.now() - temp_storage[user_id]["timestamp"]) > timedelta(minutes=5):
+        del temp_storage[user_id]
+        await message.answer("Время ввода истекло. Пожалуйста, начните регистрацию заново.")
         return
 
-    # В обработчике username
-    if message.from_user.id in temp_storage:
-        data = temp_storage.pop(message.from_user.id)
-        await save_participant(message.from_user.id, username, data["phone"])
+    username = message.text.strip().strip('@')  # Удаляем пробелы и @
 
-    await message.answer("Спасибо! Ваш username сохранен.")
+    # Валидация username
+    if not (3 <= len(username) <= 32 and username.replace('_', '').isalnum()):
+        await message.answer("Некорректный username. Должен содержать только буквы, цифры и _, длиной 3-32 символа.")
+        return
+
+    # Получаем номер из временного хранилища
+    phone = temp_storage[user_id]["phone"]
+
+    try:
+        await save_participant(user_id, username, phone)
+        await message.answer(MESSAGES["registration_success"])
+    except asyncpg.exceptions.UniqueViolationError:
+        await message.answer("Этот username уже занят. Пожалуйста, введите другой.")
+    except Exception as e:
+        logging.error(f"Ошибка сохранения: {e}")
+        await message.answer("Произошла ошибка при сохранении данных. Попробуйте еще раз.")
+    finally:
+        # Удаляем данные из временного хранилища в любом случае
+        temp_storage.pop(user_id, None)
+
 
 # Функция сохранения участника в БД
 async def save_participant(user_id: int, username: str, phone: str):
