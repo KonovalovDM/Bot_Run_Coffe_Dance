@@ -7,7 +7,9 @@ from datetime import datetime, timedelta
 from aiogram.client.default import DefaultBotProperties
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
+from pathlib import Path
 from aiogram.enums import ParseMode
+from aiogram.types import FSInputFile
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
@@ -54,6 +56,17 @@ def is_admin(message: types.Message) -> bool:
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
+    video_path = Path("media") / "welcome_video.mp4"
+    if video_path.exists():
+        try:
+            video = FSInputFile(path=video_path)
+            await message.answer_video(video=video, caption="👋 Добро пожаловать! Ниже — информация о мероприятии.")
+        except Exception as e:
+            logging.error(f"Ошибка отправки видео: {e}")
+            await message.answer("👋 Добро пожаловать! (не удалось отправить видео)")
+    else:
+        logging.warning("Файл welcome_video.mp4 не найден в папке media.")
+        await message.answer("👋 Добро пожаловать! (видео отсутствует)")
     kb = ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="📱 Отправить номер", request_contact=True)]],
         resize_keyboard=True
@@ -100,7 +113,6 @@ async def list_participants(message: types.Message):
 async def export_csv(message: types.Message):
     import zipfile
     import tempfile
-    from pathlib import Path
 
     async with db_pool.acquire() as conn:
         records = await conn.fetch("SELECT * FROM participants;")
